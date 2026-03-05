@@ -1,116 +1,113 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import requests
+import datetime
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(page_title="All IHSG Dividend Analyzer", layout="wide")
+st.set_page_config(page_title="IHSG Hidden Gem Miner", layout="wide")
 
-st.title("🇮🇩 All IHSG Stock Dividend & Cluster Analyzer")
-st.write("Analyzing dividend yields across the entire Indonesia Stock Exchange.")
+st.title("⛏️ IHSG Dividend Miner")
+st.write("Scanning the entire market to find hidden high-yield stocks.")
 
-# 1. Fetch all IHSG Tickers
+# 1. DYNAMIC TICKER LOADER (Scans all ~900+ IDX Stocks)
 @st.cache_data
-def get_all_ihsg_tickers():
-    # Fetching a community-maintained list of IDX tickers
-    # This URL points to a reliable raw list of all .JK tickers
+def get_all_idx_tickers():
+    # Pulling from a reliable community list of all active IDX tickers
     url = "https://raw.githubusercontent.com/baguskto/saham-mcp/master/data/ticker_list.csv"
     try:
-        df_tickers = pd.read_csv(url)
-        # Assuming the CSV has a column for ticker codes
-        return [f"{code}.JK" for code in df_tickers['code'].tolist()]
+        df_raw = pd.read_csv(url)
+        # Ensure the .JK suffix is added for Yahoo Finance
+        return [f"{row['code']}.JK" for _, row in df_raw.iterrows()]
     except:
-        # Fallback list if the URL fails
-        return ['ANTM.JK', 'BBRI.JK', 'BMRI.JK', 'ASII.JK', 'TLKM.JK', 'UNVR.JK']
+        st.error("Failed to fetch full ticker list. Falling back to a partial list.")
+        return ["ADRO.JK", "ITMG.JK", "PTBA.JK", "BBRI.JK", "TAPG.JK", "JSMR.JK"]
 
-all_tickers = get_all_ihsg_tickers()
+all_tickers = get_all_idx_tickers()
 
-# 2. Sidebar Filters
-st.sidebar.header("Global Filters")
-min_yield = st.sidebar.slider("Min Dividend Yield (%)", 0.0, 15.0, 3.0)
-target_stock = st.sidebar.text_input("🔍 Search Stock (e.g. BBCA)", "").upper()
-
-# 3. Data Fetching (Optimized)
+# 2. THE MINING ENGINE
 @st.cache_data
-def fetch_dividend_performance(ticker_list):
-    # Note: Fetching 900+ stocks one by one is slow. 
-    # In a real app, we batch this or use a pre-scraped database.
-    # For this demo, we'll limit to the top 100 or user selection.
+def mine_dividends(ticker_list):
     results = []
-    # Progress bar for large data
-    pbar = st.progress(0)
+    one_year_ago = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
     
-    # We use a smaller subset for speed in this example, 
-    # but you can remove the [:50] to run the whole market
-    subset = ticker_list[:100] 
+    # Batch processing to prevent timeout
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # NOTE: To scan ALL 900+ stocks, remove the [:100] limit. 
+    # For initial testing, we use a subset to keep it fast.
+    subset = ticker_list 
     
     for i, ticker in enumerate(subset):
         try:
+            status_text.text(f"Mining {ticker} ({i+1}/{len(subset)})...")
             stock = yf.Ticker(ticker)
-            # Get 2025 Dividends
+            
+            # Fetch TTM Dividends
             divs = stock.dividends
-            total_div = divs.loc['2025-01-01':'2025-12-31'].sum() if not divs.empty else 0
+            ttm_div = divs[divs.index >= one_year_ago].sum()
             
-            # Get Current Price
+            # Get Price & Info
             price = stock.fast_info['last_price']
-            div_yield = (total_div / price * 100) if price > 0 else 0
+            yield_val = (ttm_div / price * 100) if price > 0 else 0
             
-            results.append({
-                "Ticker": ticker.replace(".JK", ""),
-                "Price": price,
-                "Total Div 2025": total_div,
-                "Yield %": round(div_yield, 2)
-            })
+            # We only keep stocks that have a yield > 0 to save memory
+            if yield_val > 0:
+                results.append({
+                    "Ticker": ticker.replace(".JK", ""),
+                    "Price": round(price, 2),
+                    "TTM Div": round(ttm_div, 2),
+                    "Yield %": round(yield_val, 2)
+                })
         except:
             continue
-        pbar.progress((i + 1) / len(subset))
+        progress_bar.progress((i + 1) / len(subset))
     
-    pbar.empty()
+    progress_bar.empty()
+    status_text.empty()
     return pd.DataFrame(results)
 
-# --- EXECUTION ---
-with st.spinner("Fetching Market Data..."):
-    df = fetch_dividend_performance(all_tickers)
+# --- APP INTERFACE ---
+if st.button("🚀 Start Deep Market Scan"):
+    df = mine_dividends(all_tickers)
+    st.session_state['mined_data'] = df
+else:
+    df = st.session_state.get('mined_data', pd.DataFrame())
 
 if not df.empty:
-    # 4. Machine Learning (K-Means Clustering)
-    # We cluster based on Yield % to find "Yield Tiers"
+    # 3. FILTERS & SEARCH
+    st.sidebar.header("Miner Settings")
+    min_yield = st.sidebar.number_input("Min Yield %", value=5.0, step=0.5)
+    search = st.sidebar.text_input("🔍 Check Research Stock", "").upper()
+
+    # 4. ML CLUSTERING (Identifying Yield Profiles)
     X = df[['Yield %']].values
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    df['Cluster'] = KMeans(n_clusters=3, n_init=10).fit_predict(StandardScaler().fit_transform(X))
     
-    kmeans = KMeans(n_clusters=3, random_state=42)
-    df['Cluster'] = kmeans.fit_predict(X_scaled)
-    
-    # Sort labels so Cluster 0 is always Low and Cluster 2 is High
-    order = df.groupby('Cluster')['Yield %'].mean().sort_values().index
-    mapping = {order[0]: "Low/Growth", order[1]: "Medium", order[2]: "High Yield"}
-    df['Tier'] = df['Cluster'].map(mapping)
+    # Sort clusters for logical labeling
+    means = df.groupby('Cluster')['Yield %'].mean().sort_values()
+    labels = {means.index[0]: "Low Yield", means.index[1]: "Mid Yield", means.index[2]: "High Yield"}
+    df['Profile'] = df['Cluster'].map(labels)
 
-    # 5. Dashboard
-    col1, col2, col3 = st.columns(3)
+    # 5. RESULTS DISPLAY
+    col1, col2 = st.columns([3, 1])
     
-    top_stock = df.loc[df['Yield %'].idxmax()]
-    col1.metric("Highest Payer", top_stock['Ticker'], f"{top_stock['Yield %']}%")
-    col2.metric("Market Avg Yield", f"{round(df['Yield %'].mean(), 2)}%")
-    col3.metric("Analyzed Stocks", len(df))
+    with col1:
+        st.subheader("💎 Mined Stocks (Hidden Gems)")
+        filtered_df = df[df['Yield %'] >= min_yield]
+        if search:
+            filtered_df = filtered_df[filtered_df['Ticker'].str.contains(search)]
+        
+        st.dataframe(filtered_df.sort_values("Yield %", ascending=False), use_container_width=True)
 
-    # Search Logic
-    if target_stock:
-        display_df = df[df['Ticker'] == target_stock]
-        if display_df.empty:
-            st.warning(f"Stock {target_stock} not found in current batch.")
-        else:
-            st.success(f"Found {target_stock}: Yield is {display_df['Yield %'].values[0]}%")
-    
-    # Filtered View
-    st.subheader(f"Stocks with > {min_yield}% Yield")
-    filtered = df[df['Yield %'] >= min_yield].sort_values("Yield %", ascending=False)
-    st.dataframe(filtered, use_container_width=True)
-
-    # Cluster Visual
-    st.subheader("Yield Tier Distribution")
-    st.bar_chart(df['Tier'].value_counts())
+    with col2:
+        st.subheader("📊 Yield Clusters")
+        st.write(f"**Total Payers Found:** {len(df)}")
+        st.bar_chart(df['Profile'].value_counts())
+        
+        # Highlight Top 3 unpopular stocks (High yield, but not blue chips)
+        st.write("**Top 'Hidden' Yielders:**")
+        st.table(df.sort_values("Yield %", ascending=False).head(5)[['Ticker', 'Yield %']])
 else:
-    st.error("Could not load market data.")
+    st.info("Click the button above to start scanning the IHSG market for dividends.")
