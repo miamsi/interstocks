@@ -12,7 +12,7 @@ supabase: Client = create_client(url, key)
 
 def load_tickers_from_excel():
     """Reads the Excel file provided. Ensure the file is in the same folder."""
-    file_name = r"C:\Users\michael.sidabutar\Documents\stock mining\Daftar Saham  - 20260306.xlsx" 
+    file_name = "Daftar Saham  - 20260306.xlsx" 
     if not os.path.exists(file_name):
         st.error(f"❌ File not found: {file_name}")
         return []
@@ -127,4 +127,5 @@ if view_res.data:
     if st.button("🔄 Refresh Dashboard"):
         st.rerun()
 else:
+
     st.info("No yield data found. Please use the sidebar to 'Collect Yesterday's Prices'.")
