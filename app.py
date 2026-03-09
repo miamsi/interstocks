@@ -40,29 +40,21 @@ def get_oldest_price_batch(batch_size=1000):
 
 def get_stock_label(yield_val, pe, payout):
     """Categorizes the stock based on Value and Safety metrics with robust NaN handling."""
-    
-    # 1. Check for missing or zero yield
     if pd.isna(yield_val) or yield_val <= 0:
         return "⚪ No Data"
     
-    # 2. CRITICAL FIX: Robust check for missing Safety Data (ACRO Fix)
-    # Using pd.isna() ensures that 'None' and 'NaN' are both caught.
     if pd.isna(pe) or pd.isna(payout) or pe == 0 or payout <= 0:
         return "🌀 Speculative (Data Gap)"
     
-    # 3. Dividend Trap (Payout too high - e.g., PTBA/DMAS)
     if payout > 95:
         return "🚨 Yield Trap (Unsustainable)"
     
-    # 4. Dividend King (The target: High yield + Low price + Safe payout)
     if yield_val > 7 and pe < 12 and payout < 75:
         return "💎 Dividend King (High Value)"
     
-    # 5. Stable Cash Cow (Safe yield, safe payout)
     if yield_val > 4 and payout < 65:
         return "🐄 Stable Cash Cow"
     
-    # 6. Overvalued (Price is too high regardless of yield)
     if pe > 25:
         return "🎈 Overvalued (Price too high)"
         
@@ -70,7 +62,7 @@ def get_stock_label(yield_val, pe, payout):
 
 # --- UI SETUP ---
 st.set_page_config(page_title="IHSG Yield Master", layout="wide")
-st.title("🏆 IHSG Dividend Master (Full Fix)")
+st.title("🏆 IHSG Dividend Master (Pro Filter Edition)")
 
 # --- 1. SEARCH SECTION ---
 st.subheader("🔍 Smart Ticker Analysis")
@@ -91,7 +83,6 @@ if search_ticker:
                 ticker_obj = yf.Ticker(t_jk)
                 live_price = ticker_obj.fast_info['last_price']
                 live_ratio = (div_val / live_price * 100) if live_price > 0 else 0
-                
                 label = get_stock_label(live_ratio, pe_val, payout)
                 
                 if "Speculative" in label:
@@ -154,14 +145,49 @@ with st.sidebar:
                 except Exception: continue
             st.rerun()
 
-# --- 3. MAIN DASHBOARD ---
+# --- 3. MAIN DASHBOARD WITH FILTERS ---
 st.subheader("🔥 Dividend Leaderboard")
-view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yield", "null").order("dividend_yield", desc=True).limit(100).execute()
+
+# --- FILTER CONTROLS ---
+with st.expander("🛠️ Filter Controls", expanded=True):
+    f1, f2, f3 = st.columns(3)
+    
+    # Category Filter
+    category_options = [
+        "All Categories", 
+        "💎 Dividend King (High Value)", 
+        "🐄 Stable Cash Cow", 
+        "🔍 Neutral / Under Analysis", 
+        "🌀 Speculative (Data Gap)", 
+        "🚨 Yield Trap (Unsustainable)",
+        "🎈 Overvalued (Price too high)"
+    ]
+    selected_cat = f1.selectbox("Filter by Category:", category_options)
+    
+    # Yield Filter
+    min_yield = f2.slider("Minimum Yield %:", 0.0, 30.0, 0.0)
+    
+    # Toggle for Speculative
+    hide_spec = f3.checkbox("Hide Speculative Stocks", value=False)
+
+# Data Fetching
+view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yield", "null").order("dividend_yield", desc=True).limit(500).execute()
 
 if view_res.data:
     df = pd.DataFrame(view_res.data)
-    # Apply robust label logic
     df['Category'] = df.apply(lambda x: get_stock_label(x['dividend_yield'], x['pe_ratio'], x['payout_ratio']), axis=1)
+    
+    # APPLY FILTERS
+    if selected_cat != "All Categories":
+        df = df[df['Category'] == selected_cat]
+        
+    df = df[df['dividend_yield'] >= min_yield]
+    
+    if hide_spec:
+        df = df[~df['Category'].str.contains("Speculative")]
+
+    # Display Count
+    st.caption(f"Showing {len(df)} results matching your filters.")
     
     st.dataframe(
         df[["ticker", "Category", "dividend_yield", "pe_ratio", "payout_ratio", "previous_close"]],
@@ -173,3 +199,5 @@ if view_res.data:
             "previous_close": "Price"
         }
     )
+else:
+    st.info("No data available to filter. Start the Mining Engine in the sidebar.")
