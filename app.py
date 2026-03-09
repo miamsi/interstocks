@@ -38,11 +38,38 @@ def get_oldest_price_batch(batch_size=1000):
         st.sidebar.error(f"Queue Error: {e}")
         return []
 
+def get_stock_label(yield_val, pe, payout):
+    """Categorizes the stock based on Value and Safety metrics."""
+    if yield_val == 0 or yield_val is None:
+        return "⚪ No Data"
+    
+    # 1. Speculative (New IPOs or missing data like ACRO)
+    if pe is None or payout is None or pe == 0:
+        return "🌀 Speculative (Missing Data)"
+    
+    # 2. Dividend Trap (Payout too high like DMAS)
+    if payout > 95:
+        return "🚨 Yield Trap (Unsustainable)"
+    
+    # 3. Dividend King (High yield, cheap price, safe payout)
+    if yield_val > 7 and pe < 12 and payout < 75:
+        return "💎 Dividend King (High Value)"
+    
+    # 4. Cash Cow (Stable, decent yield, safe payout)
+    if yield_val > 4 and payout < 65:
+        return "🐄 Stable Cash Cow"
+    
+    # 5. Overvalued
+    if pe > 25:
+        return "🎈 Overvalued (Price too high)"
+        
+    return "🔍 Neutral / Under Analysis"
+
 # --- UI SETUP ---
 st.set_page_config(page_title="IHSG Yield Master", layout="wide")
-st.title("🏆 IHSG Dividend Master (Safety & Value Edition)")
+st.title("🏆 IHSG Dividend Master (Smart Labels Edition)")
 
-# --- 1. SEARCH SECTION (Live Ratio & Safety Check) ---
+# --- 1. SEARCH SECTION (Live Ratio & Smart Label) ---
 st.subheader("🔍 Smart Ticker Analysis")
 search_ticker = st.text_input("Analyze Ticker (e.g. ITMG, BBCA):", "").upper()
 
@@ -59,25 +86,19 @@ if search_ticker:
             
             div_val = stock_data['total_dividend_2025']
             live_ratio = (div_val / live_price * 100) if live_price > 0 else 0
-            
-            # Fundamental Metrics
-            pe_val = info.get('trailingPE', 0)
+            pe_val = info.get('trailingPE')
             payout = info.get('payoutRatio', 0) * 100 if info.get('payoutRatio') else 0
+            
+            # Get the Smart Label
+            label = get_stock_label(live_ratio, pe_val, payout)
+            
+            st.info(f"**Investment Category:** {label}")
             
             s1, s2, s3, s4 = st.columns(4)
             s1.metric("Live Yield Ratio", f"{live_ratio:.2f}%")
-            s2.metric("P/E (Valuation)", f"{pe_val:.2f}x")
+            s2.metric("P/E (Valuation)", f"{pe_val:.2f}x" if pe_val else "N/A")
             s3.metric("Payout Ratio", f"{payout:.1f}%")
-            
-            # Sustainability Logic
-            if payout > 95:
-                s4.error("🚨 HIGH RISK: Dividend Trap")
-            elif payout > 75:
-                s4.warning("⚠️ CAUTION: Tight Buffer")
-            elif payout > 0:
-                s4.success("✅ HEALTHY: Sustainable")
-            else:
-                s4.info("Data Pending")
+            s4.metric("Live Price", f"Rp {live_price:,.0f}")
     else:
         st.warning(f"Ticker {t_jk} not found in database.")
 
@@ -90,36 +111,27 @@ update_queue = get_oldest_price_batch(1000)
 with st.sidebar:
     st.header("📊 Mining Engine")
     st.write(f"Total Tickers: **{len(all_ihsg)}**")
-    
     st.divider()
     st.subheader("Action Center")
-    st.write("Updates the **oldest 1000** records with Last Hour Price + Fundamentals.")
     
     if st.button("🚀 Update Next Batch (1000)"):
         if not update_queue:
-            st.error("No stocks found in database to update.")
+            st.error("No stocks found.")
         else:
             p_bar = st.progress(0)
             status_text = st.empty()
-            
             for i, ticker in enumerate(update_queue):
                 try:
-                    status_text.text(f"Updating, do not close or refresh this page [{i+1}/956]: {ticker}")
+                    status_text.text(f"Updating [{i+1}/956]: {ticker}")
                     stock = yf.Ticker(ticker)
-                    
-                    # 1. Price Data
                     hist = stock.history(period="1d", interval="1h")
-                    
                     if not hist.empty:
                         recent_price = hist['Close'].iloc[-1]
-                        
-                        # 2. Fundamental Data
                         info = stock.info
                         pe_ratio = info.get('trailingPE')
                         payout_ratio = info.get('payoutRatio')
                         if payout_ratio: payout_ratio = round(payout_ratio * 100, 2)
                         
-                        # 3. DB Calculations
                         db_row = supabase.table("master_schedule").select("total_dividend_2025").eq("ticker", ticker).execute()
                         div_2025 = db_row.data[0]['total_dividend_2025']
                         calc_yield = (div_2025 / recent_price * 100) if recent_price > 0 else 0
@@ -131,25 +143,24 @@ with st.sidebar:
                             "payout_ratio": payout_ratio,
                             "last_mined": datetime.now().isoformat()
                         }).eq("ticker", ticker).execute()
-                    
                     p_bar.progress((i + 1) / len(update_queue))
                     time.sleep(0.05)
-                except Exception:
-                    continue
-            
-            st.success("Batch finished! Database updated.")
+                except Exception: continue
+            st.success("Batch finished!")
             st.rerun()
 
 # --- 3. MAIN DASHBOARD ---
-st.subheader("🔥 Top Dividend Yields (Sorted by Recently Mined Price)")
+st.subheader("🔥 Dividend Leaderboard (with Smart Analysis)")
 
-view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yield", "null").order("dividend_yield", desc=True).limit(50).execute()
+view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yield", "null").order("dividend_yield", desc=True).limit(100).execute()
 
 if view_res.data:
     df = pd.DataFrame(view_res.data)
     
-    # Strictly sticking to your display columns while adding fundamentals
-    df_display = df[["ticker", "company_name", "dividend_yield", "pe_ratio", "payout_ratio", "previous_close", "last_mined"]]
+    # Apply the labeling logic to the whole dataframe
+    df['Category'] = df.apply(lambda x: get_stock_label(x['dividend_yield'], x['pe_ratio'], x['payout_ratio']), axis=1)
+    
+    df_display = df[["ticker", "Category", "dividend_yield", "pe_ratio", "payout_ratio", "previous_close", "last_mined"]]
     
     st.dataframe(
         df_display,
@@ -158,8 +169,8 @@ if view_res.data:
             "dividend_yield": st.column_config.NumberColumn("Yield Rate", format="%.2f%%"),
             "pe_ratio": st.column_config.NumberColumn("P/E Ratio", format="%.2f x"),
             "payout_ratio": st.column_config.NumberColumn("Payout Ratio", format="%.1f%%"),
-            "previous_close": "Last Hour Price (Rp)",
-            "last_mined": st.column_config.DatetimeColumn("Price Timestamp")
+            "previous_close": "Last Price",
+            "last_mined": st.column_config.DatetimeColumn("Timestamp")
         }
     )
     
