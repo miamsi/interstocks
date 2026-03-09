@@ -12,7 +12,8 @@ supabase: Client = create_client(url, key)
 
 def load_tickers_from_excel():
     """Reads the Excel file provided. Ensure the file is in the same folder."""
-    file_name = "Daftar Saham  - 20260306.xlsx" 
+    # Using the path provided in your snippet
+    file_name = r"C:\Users\michael.sidabutar\Documents\stock mining\Daftar Saham  - 20260306.xlsx" 
     if not os.path.exists(file_name):
         st.error(f"❌ File not found: {file_name}")
         return []
@@ -27,7 +28,7 @@ def load_tickers_from_excel():
 def get_pending_price_tasks():
     """Finds tickers that have dividend data but are missing the yield/price."""
     try:
-        # Target rows where we have dividends but haven't fetched yesterday's price yet
+        # Target rows where we have dividends but haven't fetched recent price yet
         res = supabase.table("master_schedule").select("ticker").is_("previous_close", "null").execute()
         return [row['ticker'] for row in res.data]
     except:
@@ -46,6 +47,7 @@ if search_ticker:
     if res.data:
         stock_data = res.data[0]
         with st.spinner(f"Fetching live data for {t_jk}..."):
+            # fast_info gives the absolute latest price
             live_price = yf.Ticker(t_jk).fast_info['last_price']
             div_val = stock_data['total_dividend_2025']
             live_ratio = (div_val / live_price * 100) if live_price > 0 else 0
@@ -70,38 +72,39 @@ with st.sidebar:
     
     st.divider()
     st.subheader("Action Center")
-    # THE PRICE COLLECTOR BUTTON (BATCH 200)
-    if st.button("🚀 Collect Yesterday's Prices (Batch 200)"):
+    # THE PRICE COLLECTOR BUTTON (BATCH 200) - UPDATED TO 1 HOUR
+    if st.button("🚀 Collect Last Hour Prices (Batch 200)"):
         batch = pending_prices[:200]
-        st.info(f"Updating prices for {len(batch)} stocks...")
+        st.info(f"Updating prices for {len(batch)} stocks (1-Hour Interval)...")
         p_bar = st.progress(0)
         
         for i, ticker in enumerate(batch):
             try:
                 stock = yf.Ticker(ticker)
-                hist = stock.history(period="1h")
+                # CHANGE: Using 1-hour interval for more recent data
+                hist = stock.history(period="1d", interval="1h")
                 if not hist.empty:
-                    prev_close = hist['Close'].iloc[-1]
+                    recent_price = hist['Close'].iloc[-1]
                     
                     # Fetch current div from DB to calc yield
                     db_row = supabase.table("master_schedule").select("total_dividend_2025").eq("ticker", ticker).execute()
                     div_2025 = db_row.data[0]['total_dividend_2025']
-                    calc_yield = (div_2025 / prev_close * 100) if prev_close > 0 else 0
+                    calc_yield = (div_2025 / recent_price * 100) if recent_price > 0 else 0
                     
                     supabase.table("master_schedule").update({
-                        "previous_close": float(prev_close),
+                        "previous_close": float(recent_price),
                         "dividend_yield": round(float(calc_yield), 2),
                         "last_mined": "now()"
                     }).eq("ticker", ticker).execute()
                 
                 p_bar.progress((i + 1) / len(batch))
-                time.sleep(0.2)
+                time.sleep(0.1) # Faster sleep as we are just fetching prices
             except:
                 continue
         st.rerun()
 
 # 3. MAIN DASHBOARD (Top Percentage)
-st.subheader("🔥 Top Dividend Yields (Sorted by Yesterday's Close)")
+st.subheader("🔥 Top Dividend Yields (Sorted by Recent Hourly Price)")
 
 view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yield", "null").order("dividend_yield", desc=True).limit(50).execute()
 
@@ -115,18 +118,15 @@ if view_res.data:
         use_container_width=True,
         column_config={
             "total_dividend_2025": "Total Div 2025 (Rp)",
-            "previous_close": "Yesterday's Price (Rp)",
+            "previous_close": "Last Hour Price (Rp)",
             "dividend_yield": st.column_config.NumberColumn("Yield Rate", format="%.2f%%"),
             "last_mined": st.column_config.DatetimeColumn("Price Updated At")
         }
     )
     
-    # INDIVIDUAL LIVE UPDATER
     st.write("---")
     st.write("💡 *Use the 'Live Ratio Search' above or click below to refresh the leaderboard.*")
     if st.button("🔄 Refresh Dashboard"):
         st.rerun()
 else:
-
-    st.info("No yield data found. Please use the sidebar to 'Collect Yesterday's Prices'.")
-
+    st.info("No yield data found. Please use the sidebar to 'Collect Last Hour Prices'.")
