@@ -42,25 +42,37 @@ def get_stock_label(yield_val, pe, payout):
     """Categorizes the stock based on Value and Safety metrics."""
     if yield_val == 0 or yield_val is None:
         return "⚪ No Data"
-    if pe is None or payout is None or pe == 0:
-        return "🌀 Speculative (Missing Data)"
+    
+    # REFINED LOGIC: If payout is 0 or None, it's a data gap (speculative)
+    # This prevents stocks like YUPI from being called 'Cash Cows' incorrectly.
+    if pe is None or payout is None or pe == 0 or payout <= 0:
+        return "🌀 Speculative (Data Gap)"
+    
+    # 1. Dividend Trap (Payout too high)
     if payout > 95:
         return "🚨 Yield Trap (Unsustainable)"
+    
+    # 2. Dividend King (High yield, cheap price, safe payout)
     if yield_val > 7 and pe < 12 and payout < 75:
         return "💎 Dividend King (High Value)"
-    if yield_val > 4 and payout < 65:
+    
+    # 3. Stable Cash Cow (Must have a verified positive payout ratio)
+    if yield_val > 4 and 0 < payout < 65:
         return "🐄 Stable Cash Cow"
+    
+    # 4. Overvalued
     if pe > 25:
         return "🎈 Overvalued (Price too high)"
+        
     return "🔍 Neutral / Under Analysis"
 
 # --- UI SETUP ---
 st.set_page_config(page_title="IHSG Yield Master", layout="wide")
-st.title("🏆 IHSG Dividend Master (Anti-Rate Limit)")
+st.title("🏆 IHSG Dividend Master (Safety-First Edition)")
 
-# --- 1. SEARCH SECTION (Using DB Data to avoid Rate Limits) ---
+# --- 1. SEARCH SECTION ---
 st.subheader("🔍 Smart Ticker Analysis")
-search_ticker = st.text_input("Analyze Ticker (e.g. ITMG, BBCA):", "").upper()
+search_ticker = st.text_input("Analyze Ticker (e.g. ITMG, YUPI):", "").upper()
 
 if search_ticker:
     t_jk = f"{search_ticker}.JK" if not search_ticker.endswith(".JK") else search_ticker
@@ -68,35 +80,39 @@ if search_ticker:
     
     if res.data:
         stock_data = res.data[0]
-        # Use stored data first to avoid calling yf.info
+        # Use stored data from Vault
         pe_val = stock_data.get('pe_ratio')
-        payout = stock_data.get('payout_ratio', 0)
+        payout = stock_data.get('payout_ratio')
         div_val = stock_data['total_dividend_2025']
         
         with st.spinner(f"Getting live price for {t_jk}..."):
             try:
                 ticker_obj = yf.Ticker(t_jk)
-                # fast_info is less likely to trigger rate limits than .info
                 live_price = ticker_obj.fast_info['last_price']
                 live_ratio = (div_val / live_price * 100) if live_price > 0 else 0
                 
+                # Apply the NEW refined labeling
                 label = get_stock_label(live_ratio, pe_val, payout)
-                st.info(f"**Investment Category:** {label}")
+                
+                if "Speculative" in label:
+                    st.warning(f"**Investment Category:** {label}")
+                    st.caption("Note: Payout ratio is missing or 0, indicating a reporting gap.")
+                else:
+                    st.info(f"**Investment Category:** {label}")
                 
                 s1, s2, s3, s4 = st.columns(4)
                 s1.metric("Live Yield Ratio", f"{live_ratio:.2f}%")
-                s2.metric("P/E (from Vault)", f"{pe_val:.2f}x" if pe_val else "N/A")
-                s3.metric("Payout (from Vault)", f"{payout:.1f}%")
+                s2.metric("P/E (Vault)", f"{pe_val:.2f}x" if pe_val else "N/A")
+                s3.metric("Payout (Vault)", f"{payout:.1f}%" if payout else "0.0%")
                 s4.metric("Live Price", f"Rp {live_price:,.0f}")
             except Exception:
-                st.error("⚠️ Yahoo Finance is currently rate-limiting requests. Showing stored data only.")
-                st.write(f"Stored Price: Rp {stock_data['previous_close']}")
+                st.error("Rate limit hit. Showing Vault data only.")
     else:
-        st.warning(f"Ticker {t_jk} not found in database.")
+        st.warning(f"Ticker {t_jk} not found.")
 
 st.divider()
 
-# --- 2. SIDEBAR (The Batch Rotation Engine) ---
+# --- 2. SIDEBAR ---
 all_ihsg = load_tickers_from_excel()
 update_queue = get_oldest_price_batch(1000)
 
@@ -104,8 +120,6 @@ with st.sidebar:
     st.header("📊 Mining Engine")
     st.write(f"Total Tickers: **{len(all_ihsg)}**")
     st.divider()
-    
-    # RECOMMENDATION: Use a smaller batch if you keep getting rate limited
     if st.button("🚀 Update Next Batch (1000)"):
         if not update_queue:
             st.error("No stocks found.")
@@ -117,54 +131,46 @@ with st.sidebar:
                     status_text.text(f"Updating [{i+1}/956]: {ticker}")
                     stock = yf.Ticker(ticker)
                     hist = stock.history(period="1d", interval="1h")
-                    
                     if not hist.empty:
                         recent_price = hist['Close'].iloc[-1]
-                        
-                        # WRAP INFO CALL IN TRY-EXCEPT TO PREVENT CRASH
                         try:
                             info = stock.info
-                            pe_ratio = info.get('trailingPE')
-                            payout_ratio = info.get('payoutRatio')
-                            if payout_ratio: payout_ratio = round(payout_ratio * 100, 2)
-                        except:
-                            pe_ratio = None
-                            payout_ratio = None
+                            pe_r = info.get('trailingPE')
+                            payout_r = info.get('payoutRatio')
+                            if payout_r: payout_r = round(payout_r * 100, 2)
+                        except: pe_r, payout_r = None, None
                         
                         db_row = supabase.table("master_schedule").select("total_dividend_2025").eq("ticker", ticker).execute()
                         div_2025 = db_row.data[0]['total_dividend_2025']
-                        calc_yield = (div_2025 / recent_price * 100) if recent_price > 0 else 0
+                        calc_y = (div_2025 / recent_price * 100) if recent_price > 0 else 0
                         
                         supabase.table("master_schedule").update({
                             "previous_close": float(recent_price),
-                            "dividend_yield": round(float(calc_yield), 2),
-                            "pe_ratio": pe_ratio,
-                            "payout_ratio": payout_ratio,
+                            "dividend_yield": round(float(calc_y), 2),
+                            "pe_ratio": pe_r,
+                            "payout_ratio": payout_r,
                             "last_mined": datetime.now().isoformat()
                         }).eq("ticker", ticker).execute()
-                    
                     p_bar.progress((i + 1) / len(update_queue))
-                    time.sleep(0.2) # Increased sleep to 0.2s to respect Yahoo's limits
+                    time.sleep(0.2)
                 except Exception: continue
-            st.success("Batch finished!")
             st.rerun()
 
 # --- 3. MAIN DASHBOARD ---
-st.subheader("🔥 Top Dividend Yields (Sorted by Recently Mined Price)")
-
+st.subheader("🔥 Dividend Leaderboard")
 view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yield", "null").order("dividend_yield", desc=True).limit(100).execute()
 
 if view_res.data:
     df = pd.DataFrame(view_res.data)
     df['Category'] = df.apply(lambda x: get_stock_label(x['dividend_yield'], x['pe_ratio'], x['payout_ratio']), axis=1)
-    df_display = df[["ticker", "Category", "dividend_yield", "pe_ratio", "payout_ratio", "previous_close", "last_mined"]]
     
-    st.dataframe(df_display, use_container_width=True, column_config={
-        "dividend_yield": st.column_config.NumberColumn("Yield Rate", format="%.2f%%"),
-        "pe_ratio": st.column_config.NumberColumn("P/E Ratio", format="%.2f x"),
-        "payout_ratio": st.column_config.NumberColumn("Payout Ratio", format="%.1f%%"),
-        "previous_close": "Last Price",
-        "last_mined": st.column_config.DatetimeColumn("Timestamp")
-    })
-    if st.button("🔄 Refresh Dashboard View"):
-        st.rerun()
+    st.dataframe(
+        df[["ticker", "Category", "dividend_yield", "pe_ratio", "payout_ratio", "previous_close"]],
+        use_container_width=True,
+        column_config={
+            "dividend_yield": st.column_config.NumberColumn("Yield %", format="%.2f%%"),
+            "pe_ratio": st.column_config.NumberColumn("P/E", format="%.2f x"),
+            "payout_ratio": st.column_config.NumberColumn("Payout %", format="%.1f%%"),
+            "previous_close": "Price"
+        }
+    )
