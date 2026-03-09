@@ -26,7 +26,7 @@ def load_tickers_from_excel():
         st.error(f"❌ Error reading Excel: {e}")
         return []
 
-def get_oldest_price_batch(batch_size=200):
+def get_oldest_price_batch(batch_size=1000):
     """
     Logic: Pulls the stocks that haven't been updated for the longest time.
     This creates a rotation so every stock eventually gets the 'Last Hour' price.
