@@ -74,8 +74,8 @@ st.divider()
 
 # --- 2. SIDEBAR (The Batch Rotation Engine) ---
 all_ihsg = load_tickers_from_excel()
-# Get the next batch of 200 based on who is 'oldest' in the database
-update_queue = get_oldest_price_batch(200)
+# Get the next batch of 1000 based on who is 'oldest' in the database
+update_queue = get_oldest_price_batch(1000)
 
 with st.sidebar:
     st.header("📊 Mining Engine")
@@ -83,9 +83,9 @@ with st.sidebar:
     
     st.divider()
     st.subheader("Action Center")
-    st.write("This button updates the **oldest 200** records to the current Last Hour Price.")
+    st.write("This button updates the **oldest 1000** records to the current Last Hour Price.")
     
-    if st.button("🚀 Update Next Batch (200)"):
+    if st.button("🚀 Update Next Batch (1000)"):
         if not update_queue:
             st.error("No stocks found in database to update.")
         else:
@@ -121,7 +121,7 @@ with st.sidebar:
                 except Exception:
                     continue
             
-            st.success("Batch finished! These 200 are now at the back of the queue.")
+            st.success("Batch finished! These 1000 are now at the back of the queue.")
             st.rerun()
 
 # --- 3. MAIN DASHBOARD ---
