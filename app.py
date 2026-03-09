@@ -94,7 +94,7 @@ with st.sidebar:
             
             for i, ticker in enumerate(update_queue):
                 try:
-                    status_text.text(f"Updating [{i+1}/200]: {ticker}")
+                    status_text.text(f"Updating, do not close or refresh this page [{i+1}/956]: {ticker}")
                     stock = yf.Ticker(ticker)
                     
                     # Last 1-hour price
