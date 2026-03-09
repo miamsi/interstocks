@@ -79,7 +79,7 @@ with st.sidebar:
         for i, ticker in enumerate(batch):
             try:
                 stock = yf.Ticker(ticker)
-                hist = stock.history(period="5d")
+                hist = stock.history(period="1h")
                 if not hist.empty:
                     prev_close = hist['Close'].iloc[-1]
                     
@@ -129,3 +129,4 @@ if view_res.data:
 else:
 
     st.info("No yield data found. Please use the sidebar to 'Collect Yesterday's Prices'.")
+
