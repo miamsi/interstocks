@@ -39,28 +39,30 @@ def get_oldest_price_batch(batch_size=1000):
         return []
 
 def get_stock_label(yield_val, pe, payout):
-    """Categorizes the stock based on Value and Safety metrics."""
-    if yield_val == 0 or yield_val is None:
+    """Categorizes the stock based on Value and Safety metrics with robust NaN handling."""
+    
+    # 1. Check for missing or zero yield
+    if pd.isna(yield_val) or yield_val <= 0:
         return "⚪ No Data"
     
-    # REFINED LOGIC: If payout is 0 or None, it's a data gap (speculative)
-    # This prevents stocks like YUPI from being called 'Cash Cows' incorrectly.
-    if pe is None or payout is None or pe == 0 or payout <= 0:
+    # 2. CRITICAL FIX: Robust check for missing Safety Data (ACRO Fix)
+    # Using pd.isna() ensures that 'None' and 'NaN' are both caught.
+    if pd.isna(pe) or pd.isna(payout) or pe == 0 or payout <= 0:
         return "🌀 Speculative (Data Gap)"
     
-    # 1. Dividend Trap (Payout too high)
+    # 3. Dividend Trap (Payout too high - e.g., PTBA/DMAS)
     if payout > 95:
         return "🚨 Yield Trap (Unsustainable)"
     
-    # 2. Dividend King (High yield, cheap price, safe payout)
+    # 4. Dividend King (The target: High yield + Low price + Safe payout)
     if yield_val > 7 and pe < 12 and payout < 75:
         return "💎 Dividend King (High Value)"
     
-    # 3. Stable Cash Cow (Must have a verified positive payout ratio)
-    if yield_val > 4 and 0 < payout < 65:
+    # 5. Stable Cash Cow (Safe yield, safe payout)
+    if yield_val > 4 and payout < 65:
         return "🐄 Stable Cash Cow"
     
-    # 4. Overvalued
+    # 6. Overvalued (Price is too high regardless of yield)
     if pe > 25:
         return "🎈 Overvalued (Price too high)"
         
@@ -68,11 +70,11 @@ def get_stock_label(yield_val, pe, payout):
 
 # --- UI SETUP ---
 st.set_page_config(page_title="IHSG Yield Master", layout="wide")
-st.title("🏆 IHSG Dividend Master (Safety-First Edition)")
+st.title("🏆 IHSG Dividend Master (Full Fix)")
 
 # --- 1. SEARCH SECTION ---
 st.subheader("🔍 Smart Ticker Analysis")
-search_ticker = st.text_input("Analyze Ticker (e.g. ITMG, YUPI):", "").upper()
+search_ticker = st.text_input("Analyze Ticker (e.g. ITMG, ACRO):", "").upper()
 
 if search_ticker:
     t_jk = f"{search_ticker}.JK" if not search_ticker.endswith(".JK") else search_ticker
@@ -80,7 +82,6 @@ if search_ticker:
     
     if res.data:
         stock_data = res.data[0]
-        # Use stored data from Vault
         pe_val = stock_data.get('pe_ratio')
         payout = stock_data.get('payout_ratio')
         div_val = stock_data['total_dividend_2025']
@@ -91,19 +92,17 @@ if search_ticker:
                 live_price = ticker_obj.fast_info['last_price']
                 live_ratio = (div_val / live_price * 100) if live_price > 0 else 0
                 
-                # Apply the NEW refined labeling
                 label = get_stock_label(live_ratio, pe_val, payout)
                 
                 if "Speculative" in label:
-                    st.warning(f"**Investment Category:** {label}")
-                    st.caption("Note: Payout ratio is missing or 0, indicating a reporting gap.")
+                    st.warning(f"**Status:** {label}")
                 else:
-                    st.info(f"**Investment Category:** {label}")
+                    st.info(f"**Status:** {label}")
                 
                 s1, s2, s3, s4 = st.columns(4)
                 s1.metric("Live Yield Ratio", f"{live_ratio:.2f}%")
-                s2.metric("P/E (Vault)", f"{pe_val:.2f}x" if pe_val else "N/A")
-                s3.metric("Payout (Vault)", f"{payout:.1f}%" if payout else "0.0%")
+                s2.metric("P/E (Vault)", f"{pe_val:.2f}x" if not pd.isna(pe_val) else "N/A")
+                s3.metric("Payout (Vault)", f"{payout:.1f}%" if not pd.isna(payout) else "0.0%")
                 s4.metric("Live Price", f"Rp {live_price:,.0f}")
             except Exception:
                 st.error("Rate limit hit. Showing Vault data only.")
@@ -119,7 +118,6 @@ update_queue = get_oldest_price_batch(1000)
 with st.sidebar:
     st.header("📊 Mining Engine")
     st.write(f"Total Tickers: **{len(all_ihsg)}**")
-    st.divider()
     if st.button("🚀 Update Next Batch (1000)"):
         if not update_queue:
             st.error("No stocks found.")
@@ -162,6 +160,7 @@ view_res = supabase.table("master_schedule").select("*").not_.is_("dividend_yiel
 
 if view_res.data:
     df = pd.DataFrame(view_res.data)
+    # Apply robust label logic
     df['Category'] = df.apply(lambda x: get_stock_label(x['dividend_yield'], x['pe_ratio'], x['payout_ratio']), axis=1)
     
     st.dataframe(
