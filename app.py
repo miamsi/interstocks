@@ -17,7 +17,7 @@ groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 def load_tickers_from_excel():
     file_name = "Daftar Saham  - 20260306.xlsx" 
     if not os.path.exists(file_name):
-        file_name = r"C:\Users\michael.sidabutar\Documents\stock mining\Daftar Saham  - 20260306.xlsx"
+        file_name = "Daftar Saham  - 20260306.xlsx"
     if not os.path.exists(file_name):
         return []
     try:
@@ -111,7 +111,7 @@ def run_groq_simulation(df_stocks, df_bonds, profile):
     try:
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama3-8b-8192",
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
         )
         return completion.choices[0].message.content
