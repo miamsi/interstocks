@@ -231,7 +231,7 @@ def build_purchase_plan(simulation, stocks, bonds):
 def run_groq_simulation(profile, stocks, bonds, simulation):
 
     prompt = f"""
-Jelaskan strategi investasi berikut dalam bahasa Indonesia.
+Saya adalah orang awam yang ingin melakukan investasi. Jelaskan strategi investasi berikut dalam bahasa Indonesia kepada saya.
 
 PROFIL INVESTOR
 Modal: Rp {profile['budget']:,.0f}
