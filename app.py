@@ -15,6 +15,7 @@ supabase: Client = create_client(url, key)
 
 groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
+
 # --- DATA FUNCTIONS ---
 
 
@@ -27,9 +28,7 @@ def load_tickers_from_excel():
 
     try:
         df = pd.read_excel(file_name)
-
         tickers = df['Kode'].dropna().astype(str).tolist()
-
         return [f"{t}.JK" for t in tickers if len(t) == 4]
 
     except:
@@ -52,7 +51,6 @@ def load_bonds_data():
             try:
                 df_bonds = pd.read_csv(f) if f.endswith(".csv") else pd.read_excel(f)
                 break
-
             except:
                 continue
 
@@ -79,63 +77,27 @@ def load_bonds_data():
     return df_bonds.dropna(subset=["ticker", "price"])
 
 
-def get_oldest_price_batch(batch_size=1000):
-
-    try:
-
-        res = supabase.table("master_schedule")\
-            .select("ticker")\
-            .order("last_mined", desc=False)\
-            .limit(batch_size)\
-            .execute()
-
-        return [r["ticker"] for r in res.data]
-
-    except:
-        return []
+# --- RISK ENGINE ---
 
 
-def get_stock_label(yield_val, pe, payout):
-
-    if pd.isna(yield_val) or yield_val <= 0:
-        return "⚪ No Data"
-
-    if pd.isna(pe) or pd.isna(payout) or pe == 0:
-        return "🌀 Speculative (Data Gap)"
-
-    if payout > 95:
-        return "🚨 Yield Trap (Unsustainable)"
-
-    if yield_val > 7 and pe < 12 and payout < 75:
-        return "💎 Dividend King (High Value)"
-
-    if yield_val > 4 and payout < 65:
-        return "🐄 Stable Cash Cow"
-
-    if pe > 25:
-        return "🎈 Overvalued (Price too high)"
-
-    return "🔍 Neutral / Under Analysis"
-
-
-# --- PORTFOLIO ENGINE ---
-
-
-def calculate_risk_score(drawdown, horizon):
+def calculate_risk_score(drawdown, horizon, liquidity):
 
     score = 0
 
-    if drawdown == "Sell everything":
+    if drawdown == "Sell semuanya":
         score += 1
 
-    elif drawdown == "Wait":
+    elif drawdown == "Tunggu":
         score += 2
 
-    elif drawdown == "Buy more":
+    elif drawdown == "Beli lebih banyak":
         score += 3
 
     if horizon == "5+ Tahun":
         score += 2
+
+    if liquidity == "Butuh uang dalam waktu dekat":
+        score -= 1
 
     return score
 
@@ -152,7 +114,7 @@ def allocation_from_risk(score):
         return 0.75, 0.25
 
 
-# --- IMPROVED STOCK FILTER ---
+# --- STOCK FILTER ---
 
 
 def select_stocks(df):
@@ -163,20 +125,16 @@ def select_stocks(df):
         (df["pe_ratio"] < 20)
     ].copy()
 
-    # Momentum filter (avoid falling knives)
-
-    if "previous_close" in df.columns and "ma50" in df.columns:
-
-        df = df[df["previous_close"] > df["ma50"]]
-
     df["score"] = (
         df["dividend_yield"] * 0.45 +
         (1 / df["pe_ratio"]) * 0.25 +
-        (1 - df["payout_ratio"] / 100) * 0.2 +
-        df["dividend_yield"] * 0.10
+        (1 - df["payout_ratio"] / 100) * 0.2
     )
 
     return df.sort_values("score", ascending=False).head(5)
+
+
+# --- PORTFOLIO SIMULATION ---
 
 
 def simulate_portfolio(budget, stock_pct, bond_pct, stocks, bonds):
@@ -209,7 +167,7 @@ def simulate_portfolio(budget, stock_pct, bond_pct, stocks, bonds):
     }
 
 
-# --- PURCHASE PLAN ---
+# --- PURCHASE PLAN (LOT FIXED) ---
 
 
 def build_purchase_plan(simulation, stocks, bonds):
@@ -225,13 +183,20 @@ def build_purchase_plan(simulation, stocks, bonds):
 
         price = row["previous_close"]
 
-        shares = int(stock_budget_each / price)
+        lot_price = price * 100
+
+        lots = int(stock_budget_each / lot_price)
+
+        shares = lots * 100
+
+        total = shares * price
 
         stock_plan.append({
             "Ticker": row["ticker"],
-            "Harga": price,
+            "Harga per Saham": price,
+            "Jumlah Lot": lots,
             "Jumlah Saham": shares,
-            "Total Dana": shares * price
+            "Total Dana": total
         })
 
     stock_plan = pd.DataFrame(stock_plan)
@@ -246,11 +211,13 @@ def build_purchase_plan(simulation, stocks, bonds):
 
         units = int(bond_budget_each / price)
 
+        total = units * price
+
         bond_plan.append({
             "Obligasi": row["ticker"],
             "Harga": price,
             "Unit": units,
-            "Total Dana": units * price
+            "Total Dana": total
         })
 
     bond_plan = pd.DataFrame(bond_plan)
@@ -264,13 +231,13 @@ def build_purchase_plan(simulation, stocks, bonds):
 def run_groq_simulation(profile, stocks, bonds, simulation):
 
     prompt = f"""
-Jelaskan rekomendasi portofolio berikut dalam bahasa Indonesia.
+Jelaskan strategi investasi berikut dalam bahasa Indonesia.
 
 PROFIL INVESTOR
 Modal: Rp {profile['budget']:,.0f}
+Tujuan: {profile['priority']}
 Horizon: {profile['horizon']}
-Prioritas: {profile['priority']}
-Kekhawatiran: {profile['concern']}
+Likuiditas: {profile['liquidity']}
 
 SAHAM TERPILIH
 {stocks[['ticker','dividend_yield','pe_ratio']].to_string(index=False)}
@@ -278,12 +245,10 @@ SAHAM TERPILIH
 OBLIGASI TERPILIH
 {bonds[['ticker','real_yield']].to_string(index=False)}
 
-SIMULASI PORTOFOLIO
+SIMULASI
 Pendapatan tahunan: Rp {simulation['total_income']:,.0f}
 Pendapatan bulanan: Rp {simulation['monthly_income']:,.0f}
-Nilai terburuk portofolio: Rp {simulation['worst_case']:,.0f}
-
-Jelaskan alasan pemilihan aset dan risiko utama.
+Worst case portfolio: Rp {simulation['worst_case']:,.0f}
 """
 
     completion = groq_client.chat.completions.create(
@@ -297,149 +262,136 @@ Jelaskan alasan pemilihan aset dan risiko utama.
 
 # --- UI ---
 
+
 st.set_page_config(page_title="IHSG Dividend Master", layout="wide")
 
-st.title("🏆 IHSG Dividend Master (Pro Filter Edition)")
+st.title("IHSG Smart Portfolio Advisor")
 
-tab_sim, tab_list, tab_search = st.tabs([
-    "🤖 AI Advisor Simulation",
-    "🔥 Dividend Leaderboard",
-    "🔍 Ticker Analysis"
-])
 
-# ---------------- SIMULATION ----------------
+with st.form("advisor"):
 
-with tab_sim:
+    col1, col2 = st.columns(2)
 
-    st.subheader("🤖 Smart Portfolio Advisor")
+    with col1:
 
-    with st.form("deep_wizard"):
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            u_budget = st.number_input(
-                "Total Dana Investasi",
-                value=50000000,
-                step=5000000
-            )
-
-            u_priority = st.selectbox(
-                "Tujuan Investasi",
-                [
-                    "Passive Income",
-                    "Pertumbuhan Aset",
-                    "Keamanan Modal"
-                ]
-            )
-
-        with col2:
-
-            u_horizon = st.selectbox(
-                "Jangka Waktu",
-                [
-                    "< 1 Tahun",
-                    "1-3 Tahun",
-                    "3-5 Tahun",
-                    "5+ Tahun"
-                ]
-            )
-
-            u_drawdown = st.selectbox(
-                "Jika portfolio turun 30%",
-                [
-                    "Sell everything",
-                    "Wait",
-                    "Buy more"
-                ]
-            )
-
-        u_concern = st.text_area(
-            "Kekhawatiran utama",
-            "Saya takut kehilangan uang."
+        u_budget = st.number_input(
+            "Total Dana Investasi",
+            value=50000000,
+            step=5000000
         )
 
-        submit_sim = st.form_submit_button("Generate Strategy")
-
-    if submit_sim:
-
-        profile = {
-            "budget": u_budget,
-            "priority": u_priority,
-            "horizon": u_horizon,
-            "concern": u_concern
-        }
-
-        risk_score = calculate_risk_score(u_drawdown, u_horizon)
-
-        stock_pct, bond_pct = allocation_from_risk(risk_score)
-
-        df_b = load_bonds_data()
-
-        res = supabase.table("master_schedule")\
-            .select("*")\
-            .not_.is_("dividend_yield", "null")\
-            .limit(200)\
-            .execute()
-
-        df_s = pd.DataFrame(res.data)
-
-        df_s["Category"] = df_s.apply(
-            lambda x: get_stock_label(
-                x["dividend_yield"],
-                x["pe_ratio"],
-                x["payout_ratio"]
-            ), axis=1
+        u_priority = st.selectbox(
+            "Tujuan Investasi",
+            [
+                "Passive Income",
+                "Pertumbuhan Aset",
+                "Keamanan Modal"
+            ]
         )
 
-        top_stocks = select_stocks(df_s)
+    with col2:
 
-        bonds = df_b.sort_values("real_yield", ascending=False).head(3)
+        u_horizon = st.selectbox(
+            "Jangka Waktu",
+            [
+                "< 1 Tahun",
+                "1-3 Tahun",
+                "3-5 Tahun",
+                "5+ Tahun"
+            ]
+        )
 
-        simulation = simulate_portfolio(
-            u_budget,
-            stock_pct,
-            bond_pct,
+        u_drawdown = st.selectbox(
+            "Jika portofolio turun 30%",
+            [
+                "Sell semuanya",
+                "Tunggu",
+                "Beli lebih banyak"
+            ]
+        )
+
+    u_liquidity = st.selectbox(
+        "Kebutuhan Likuiditas",
+        [
+            "Tidak butuh uang dalam waktu dekat",
+            "Butuh uang dalam 1-2 tahun",
+            "Butuh uang dalam waktu dekat"
+        ]
+    )
+
+    submit = st.form_submit_button("Generate Portfolio")
+
+
+if submit:
+
+    profile = {
+        "budget": u_budget,
+        "priority": u_priority,
+        "horizon": u_horizon,
+        "liquidity": u_liquidity
+    }
+
+    risk_score = calculate_risk_score(u_drawdown, u_horizon, u_liquidity)
+
+    stock_pct, bond_pct = allocation_from_risk(risk_score)
+
+    df_bonds = load_bonds_data()
+
+    res = supabase.table("master_schedule")\
+        .select("*")\
+        .not_.is_("dividend_yield", "null")\
+        .limit(200)\
+        .execute()
+
+    df_stocks = pd.DataFrame(res.data)
+
+    top_stocks = select_stocks(df_stocks)
+
+    bonds = df_bonds.sort_values("real_yield", ascending=False).head(3)
+
+    simulation = simulate_portfolio(
+        u_budget,
+        stock_pct,
+        bond_pct,
+        top_stocks,
+        bonds
+    )
+
+    stock_plan, bond_plan = build_purchase_plan(
+        simulation,
+        top_stocks,
+        bonds
+    )
+
+    st.subheader("Alokasi Portofolio")
+
+    st.write(f"Saham: {stock_pct*100:.0f}%")
+    st.write(f"Obligasi: {bond_pct*100:.0f}%")
+
+    st.subheader("Rencana Pembelian Saham")
+
+    st.dataframe(stock_plan, use_container_width=True)
+
+    st.subheader("Rencana Pembelian Obligasi")
+
+    st.dataframe(bond_plan, use_container_width=True)
+
+    st.subheader("Estimasi Passive Income")
+
+    st.write(f"Pendapatan Tahunan: Rp {simulation['total_income']:,.0f}")
+    st.write(f"Pendapatan Bulanan: Rp {simulation['monthly_income']:,.0f}")
+
+    st.subheader("Skenario Risiko")
+
+    st.write(f"Nilai terburuk portofolio: Rp {simulation['worst_case']:,.0f}")
+
+    with st.spinner("AI Advisor menganalisis..."):
+
+        explanation = run_groq_simulation(
+            profile,
             top_stocks,
-            bonds
+            bonds,
+            simulation
         )
 
-        stock_plan, bond_plan = build_purchase_plan(
-            simulation,
-            top_stocks,
-            bonds
-        )
-
-        st.subheader("Portfolio Allocation")
-
-        st.write(f"Saham: {stock_pct*100:.0f}%")
-        st.write(f"Obligasi: {bond_pct*100:.0f}%")
-
-        st.subheader("Rekomendasi Pembelian Saham")
-
-        st.dataframe(stock_plan, use_container_width=True)
-
-        st.subheader("Rekomendasi Pembelian Obligasi")
-
-        st.dataframe(bond_plan, use_container_width=True)
-
-        st.subheader("Expected Passive Income")
-
-        st.write(f"Yearly: Rp {simulation['total_income']:,.0f}")
-        st.write(f"Monthly: Rp {simulation['monthly_income']:,.0f}")
-
-        st.subheader("Risk Scenario")
-
-        st.write(f"Worst case portfolio value: Rp {simulation['worst_case']:,.0f}")
-
-        with st.spinner("AI Advisor analyzing..."):
-
-            explanation = run_groq_simulation(
-                profile,
-                top_stocks,
-                bonds,
-                simulation
-            )
-
-        st.markdown(explanation)
+    st.markdown(explanation)
