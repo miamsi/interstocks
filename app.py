@@ -8,21 +8,30 @@ import os
 from datetime import datetime
 
 # --- SETUP ---
+
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(url, key)
+
 groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # --- DATA FUNCTIONS ---
 
+
 def load_tickers_from_excel():
+
     file_name = "Daftar Saham  - 20260306.xlsx"
+
     if not os.path.exists(file_name):
         return []
+
     try:
         df = pd.read_excel(file_name)
+
         tickers = df['Kode'].dropna().astype(str).tolist()
+
         return [f"{t}.JK" for t in tickers if len(t) == 4]
+
     except:
         return []
 
@@ -37,10 +46,13 @@ def load_bonds_data():
     df_bonds = pd.DataFrame()
 
     for f in possible_files:
+
         if os.path.exists(f):
+
             try:
                 df_bonds = pd.read_csv(f) if f.endswith(".csv") else pd.read_excel(f)
                 break
+
             except:
                 continue
 
@@ -59,18 +71,18 @@ def load_bonds_data():
 
     face = 1000000
 
-    if "coupon" in df_bonds.columns and "price" in df_bonds.columns:
+    df_bonds["coupon"] = pd.to_numeric(df_bonds["coupon"], errors="coerce")
+    df_bonds["price"] = pd.to_numeric(df_bonds["price"], errors="coerce")
 
-        df_bonds["coupon"] = pd.to_numeric(df_bonds["coupon"], errors="coerce")
-        df_bonds["price"] = pd.to_numeric(df_bonds["price"], errors="coerce")
-
-        df_bonds["real_yield"] = (df_bonds["coupon"] * face / df_bonds["price"]) * 100
+    df_bonds["real_yield"] = (df_bonds["coupon"] * face / df_bonds["price"]) * 100
 
     return df_bonds.dropna(subset=["ticker", "price"])
 
 
 def get_oldest_price_batch(batch_size=1000):
+
     try:
+
         res = supabase.table("master_schedule")\
             .select("ticker")\
             .order("last_mined", desc=False)\
@@ -108,6 +120,7 @@ def get_stock_label(yield_val, pe, payout):
 
 # --- PORTFOLIO ENGINE ---
 
+
 def calculate_risk_score(drawdown, horizon):
 
     score = 0
@@ -139,18 +152,28 @@ def allocation_from_risk(score):
         return 0.75, 0.25
 
 
+# --- IMPROVED STOCK FILTER ---
+
+
 def select_stocks(df):
 
     df = df[
         (df["payout_ratio"] < 85) &
         (df["dividend_yield"] > 3) &
         (df["pe_ratio"] < 20)
-    ]
+    ].copy()
+
+    # Momentum filter (avoid falling knives)
+
+    if "previous_close" in df.columns and "ma50" in df.columns:
+
+        df = df[df["previous_close"] > df["ma50"]]
 
     df["score"] = (
-        df["dividend_yield"] * 0.5 +
-        (1 / df["pe_ratio"]) * 0.3 +
-        (1 - df["payout_ratio"] / 100) * 0.2
+        df["dividend_yield"] * 0.45 +
+        (1 / df["pe_ratio"]) * 0.25 +
+        (1 - df["payout_ratio"] / 100) * 0.2 +
+        df["dividend_yield"] * 0.10
     )
 
     return df.sort_values("score", ascending=False).head(5)
@@ -162,15 +185,12 @@ def simulate_portfolio(budget, stock_pct, bond_pct, stocks, bonds):
     bond_capital = budget * bond_pct
 
     stock_yield = stocks["dividend_yield"].mean()
-
     bond_yield = bonds["real_yield"].mean()
 
     stock_income = stock_capital * (stock_yield / 100)
-
     bond_income = bond_capital * (bond_yield / 100)
 
     total_income = stock_income + bond_income
-
     monthly_income = total_income / 12
 
     worst_stock = stock_capital * 0.30
@@ -189,33 +209,81 @@ def simulate_portfolio(budget, stock_pct, bond_pct, stocks, bonds):
     }
 
 
+# --- PURCHASE PLAN ---
+
+
+def build_purchase_plan(simulation, stocks, bonds):
+
+    stock_capital = simulation["stock_capital"]
+    bond_capital = simulation["bond_capital"]
+
+    stock_budget_each = stock_capital / len(stocks)
+
+    stock_plan = []
+
+    for _, row in stocks.iterrows():
+
+        price = row["previous_close"]
+
+        shares = int(stock_budget_each / price)
+
+        stock_plan.append({
+            "Ticker": row["ticker"],
+            "Harga": price,
+            "Jumlah Saham": shares,
+            "Total Dana": shares * price
+        })
+
+    stock_plan = pd.DataFrame(stock_plan)
+
+    bond_budget_each = bond_capital / len(bonds)
+
+    bond_plan = []
+
+    for _, row in bonds.iterrows():
+
+        price = row["price"]
+
+        units = int(bond_budget_each / price)
+
+        bond_plan.append({
+            "Obligasi": row["ticker"],
+            "Harga": price,
+            "Unit": units,
+            "Total Dana": units * price
+        })
+
+    bond_plan = pd.DataFrame(bond_plan)
+
+    return stock_plan, bond_plan
+
+
 # --- AI EXPLANATION ---
+
 
 def run_groq_simulation(profile, stocks, bonds, simulation):
 
     prompt = f"""
-ROLE: Senior Indonesian Portfolio Strategist.
+Jelaskan rekomendasi portofolio berikut dalam bahasa Indonesia.
 
-INVESTOR PROFILE
-Budget: Rp {profile['budget']:,.0f}
+PROFIL INVESTOR
+Modal: Rp {profile['budget']:,.0f}
 Horizon: {profile['horizon']}
-Priority: {profile['priority']}
-Concern: {profile['concern']}
+Prioritas: {profile['priority']}
+Kekhawatiran: {profile['concern']}
 
-SELECTED STOCKS
+SAHAM TERPILIH
 {stocks[['ticker','dividend_yield','pe_ratio']].to_string(index=False)}
 
-SELECTED BONDS
+OBLIGASI TERPILIH
 {bonds[['ticker','real_yield']].to_string(index=False)}
 
-PORTFOLIO SIMULATION
+SIMULASI PORTOFOLIO
+Pendapatan tahunan: Rp {simulation['total_income']:,.0f}
+Pendapatan bulanan: Rp {simulation['monthly_income']:,.0f}
+Nilai terburuk portofolio: Rp {simulation['worst_case']:,.0f}
 
-Expected yearly income: Rp {simulation['total_income']:,.0f}
-Expected monthly income: Rp {simulation['monthly_income']:,.0f}
-
-Worst case portfolio value: Rp {simulation['worst_case']:,.0f}
-
-Explain why this portfolio fits the investor.
+Jelaskan alasan pemilihan aset dan risiko utama.
 """
 
     completion = groq_client.chat.completions.create(
@@ -337,10 +405,24 @@ with tab_sim:
             bonds
         )
 
+        stock_plan, bond_plan = build_purchase_plan(
+            simulation,
+            top_stocks,
+            bonds
+        )
+
         st.subheader("Portfolio Allocation")
 
-        st.write(f"Stocks: {stock_pct*100:.0f}%")
-        st.write(f"Bonds: {bond_pct*100:.0f}%")
+        st.write(f"Saham: {stock_pct*100:.0f}%")
+        st.write(f"Obligasi: {bond_pct*100:.0f}%")
+
+        st.subheader("Rekomendasi Pembelian Saham")
+
+        st.dataframe(stock_plan, use_container_width=True)
+
+        st.subheader("Rekomendasi Pembelian Obligasi")
+
+        st.dataframe(bond_plan, use_container_width=True)
 
         st.subheader("Expected Passive Income")
 
@@ -361,112 +443,3 @@ with tab_sim:
             )
 
         st.markdown(explanation)
-
-
-# ---------------- LEADERBOARD ----------------
-
-with tab_list:
-
-    st.subheader("🔥 Dividend Leaderboard")
-
-    with st.expander("Filter Controls", expanded=True):
-
-        f1, f2, f3 = st.columns(3)
-
-        cat_options = [
-            "All Categories",
-            "💎 Dividend King (High Value)",
-            "🐄 Stable Cash Cow",
-            "🔍 Neutral / Under Analysis",
-            "🌀 Speculative (Data Gap)",
-            "🚨 Yield Trap (Unsustainable)",
-            "🎈 Overvalued (Price too high)"
-        ]
-
-        selected_cat = f1.selectbox("Category", cat_options)
-
-        min_yield = f2.slider("Min Yield", 0.0, 30.0, 0.0)
-
-        hide_spec = f3.checkbox("Hide Speculative", True)
-
-    view_res = supabase.table("master_schedule")\
-        .select("*")\
-        .not_.is_("dividend_yield", "null")\
-        .order("dividend_yield", desc=True)\
-        .limit(500)\
-        .execute()
-
-    if view_res.data:
-
-        df = pd.DataFrame(view_res.data)
-
-        df["Category"] = df.apply(
-            lambda x: get_stock_label(
-                x["dividend_yield"],
-                x["pe_ratio"],
-                x["payout_ratio"]
-            ), axis=1
-        )
-
-        if selected_cat != "All Categories":
-            df = df[df["Category"] == selected_cat]
-
-        df = df[df["dividend_yield"] >= min_yield]
-
-        if hide_spec:
-            df = df[~df["Category"].str.contains("Speculative")]
-
-        st.dataframe(
-            df[[
-                "ticker",
-                "Category",
-                "dividend_yield",
-                "pe_ratio",
-                "payout_ratio",
-                "previous_close"
-            ]],
-            use_container_width=True
-        )
-
-
-# ---------------- SEARCH ----------------
-
-with tab_search:
-
-    st.subheader("Smart Ticker Analysis")
-
-    search_ticker = st.text_input("Ticker").upper()
-
-    if search_ticker:
-
-        res = supabase.table("master_schedule")\
-            .select("*")\
-            .eq("ticker", search_ticker)\
-            .execute()
-
-        if res.data:
-
-            df = pd.DataFrame(res.data)
-
-            st.dataframe(df)
-
-        else:
-
-            st.warning("Ticker not found")
-
-
-# ---------------- SIDEBAR ----------------
-
-all_ihsg = load_tickers_from_excel()
-
-update_queue = get_oldest_price_batch(1000)
-
-with st.sidebar:
-
-    st.header("Mining Engine")
-
-    st.write(f"Total Tickers: {len(all_ihsg)}")
-
-    if st.button("Update Next Batch"):
-
-        st.write("Mining pipeline ready")
