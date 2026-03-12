@@ -62,7 +62,8 @@ def load_bonds_data():
     rename_map = {
         "BONDS CODE": "ticker",
         "YEARLY COUPON RATE": "coupon",
-        "LATEST PRICE PER UNIT": "price"
+        "LATEST PRICE PER UNIT": "price",
+        "END DATE": "maturity"
     }
 
     df_bonds = df_bonds.rename(columns=rename_map)
@@ -72,9 +73,42 @@ def load_bonds_data():
     df_bonds["coupon"] = pd.to_numeric(df_bonds["coupon"], errors="coerce")
     df_bonds["price"] = pd.to_numeric(df_bonds["price"], errors="coerce")
 
+    df_bonds["maturity"] = pd.to_datetime(df_bonds["maturity"], errors="coerce")
+
+    df_bonds["years_to_maturity"] = (
+        df_bonds["maturity"] - pd.Timestamp.today()
+    ).dt.days / 365
+
     df_bonds["real_yield"] = (df_bonds["coupon"] * face / df_bonds["price"]) * 100
 
     return df_bonds.dropna(subset=["ticker", "price"])
+
+
+# --- BOND FILTER ---
+
+
+def filter_bonds_by_horizon(df, horizon):
+
+    if horizon == "< 1 Tahun":
+        return df[df["years_to_maturity"] <= 2]
+
+    elif horizon == "1-3 Tahun":
+        return df[df["years_to_maturity"] <= 5]
+
+    elif horizon == "3-5 Tahun":
+        return df[df["years_to_maturity"] <= 10]
+
+    else:
+        return df
+
+
+def select_bonds(df):
+
+    df = df.copy()
+
+    df["score"] = df["real_yield"] / (df["years_to_maturity"] + 1)
+
+    return df.sort_values("score", ascending=False).head(3)
 
 
 # --- RISK ENGINE ---
@@ -167,7 +201,7 @@ def simulate_portfolio(budget, stock_pct, bond_pct, stocks, bonds):
     }
 
 
-# --- PURCHASE PLAN (LOT FIXED) ---
+# --- PURCHASE PLAN ---
 
 
 def build_purchase_plan(simulation, stocks, bonds):
@@ -243,7 +277,7 @@ SAHAM TERPILIH
 {stocks[['ticker','dividend_yield','pe_ratio']].to_string(index=False)}
 
 OBLIGASI TERPILIH
-{bonds[['ticker','real_yield']].to_string(index=False)}
+{bonds[['ticker','real_yield','years_to_maturity']].to_string(index=False)}
 
 SIMULASI
 Pendapatan tahunan: Rp {simulation['total_income']:,.0f}
@@ -337,6 +371,10 @@ if submit:
 
     df_bonds = load_bonds_data()
 
+    filtered_bonds = filter_bonds_by_horizon(df_bonds, u_horizon)
+
+    bonds = select_bonds(filtered_bonds)
+
     res = supabase.table("master_schedule")\
         .select("*")\
         .not_.is_("dividend_yield", "null")\
@@ -346,8 +384,6 @@ if submit:
     df_stocks = pd.DataFrame(res.data)
 
     top_stocks = select_stocks(df_stocks)
-
-    bonds = df_bonds.sort_values("real_yield", ascending=False).head(3)
 
     simulation = simulate_portfolio(
         u_budget,
